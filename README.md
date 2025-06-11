@@ -146,3 +146,96 @@ async function main() {
 if (require.main === module) main();
 
 module.exports = { autoRBFeth, autoRBFbtc };
+
+// autoRBF.js
+// The ExDeX Early Bird Auto-RBF Suite — ETH & BTC
+
+require('dotenv').config();
+const Web3 = require('web3');
+const Client = require('bitcoin-core');
+
+/**
+ * Bump and rebroadcast a stuck Ethereum transaction.
+ * @param {string} txHash The original Ethereum tx hash.
+ * @returns {Promise<string>} The new transaction hash.
+ */
+async function autoRBFeth(txHash) {
+  const web3 = new Web3(process.env.INFURA_URL);
+  const tx = await web3.eth.getTransaction(txHash);
+  if (!tx) throw new Error('Original ETH tx not found.');
+
+  console.log(`ETH tx ${txHash}: nonce=${tx.nonce}, from=${tx.from}`);
+
+  const current = web3.utils.toBN(tx.gasPrice);
+  const bumped = current.mul(web3.utils.toBN(2)); // 2× bump
+  console.log(`Bumping gasPrice: ${web3.utils.fromWei(current, 'gwei')}→${web3.utils.fromWei(bumped, 'gwei')} Gwei`);
+
+  const replacement = {
+    from:     tx.from,
+    to:       tx.to,
+    value:    tx.value,
+    data:     tx.input,
+    nonce:    tx.nonce,
+    gas:      tx.gas,
+    gasPrice: bumped,
+    chainId:  tx.chainId || await web3.eth.getChainId(),
+  };
+
+  const { rawTransaction } = await web3.eth.accounts.signTransaction(replacement, process.env.PRIVATE_KEY);
+  const receipt = await web3.eth.sendSignedTransaction(rawTransaction);
+  console.log(`✅ ETH replacement tx: ${receipt.transactionHash}`);
+  return receipt.transactionHash;
+}
+
+/**
+ * Use Bitcoin Core RPC to bump the fee of a replaceable TX.
+ * @param {string} txid The original Bitcoin transaction ID.
+ * @returns {Promise<string>} The new transaction ID.
+ */
+async function autoRBFbtc(txid) {
+  const client = new Client({
+    network:  process.env.BTC_NETWORK || 'mainnet',
+    username: process.env.BTC_RPC_USER,
+    password: process.env.BTC_RPC_PASS,
+    host:     process.env.BTC_RPC_HOST || '127.0.0.1',
+    port:     process.env.BTC_RPC_PORT || 8332,
+  });
+
+  console.log(`BTC tx ${txid}: bumping fee…`);
+  const result = await client.command('bumpfee', txid);
+  console.log(`✅ BTC bumped txid: ${result.txid}`);
+  console.log(`   new fee: ${result.fee} BTC (orig: ${result.origfee} BTC)`);
+  return result.txid;
+}
+
+/**
+ * CLI entrypoint.
+ * Usage: node autoRBF.js <eth|btc> <txHashOrId>
+ */
+async function main() {
+  const [,, chain, id] = process.argv;
+  if (!chain || !id || !['eth', 'btc'].includes(chain.toLowerCase())) {
+    console.error('Usage: node autoRBF.js <eth|btc> <txHashOrId>');
+    process.exit(1);
+  }
+
+  try {
+    if (chain === 'eth') {
+      await autoRBFeth(id);
+    } else {
+      await autoRBFbtc(id);
+    }
+    process.exit(0);
+  } catch (err) {
+    console.error(`❌ ${chain.toUpperCase()} Auto-RBF failed: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { autoRBFeth, autoRBFbtc };
+
+
